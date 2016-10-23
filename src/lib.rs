@@ -1,7 +1,7 @@
 #![feature(conservative_impl_trait)]
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Error<E = ()> {
+pub enum Error<E> {
     Custom(E),
     StrWhitespace,
     StrIdentifier,
@@ -129,15 +129,14 @@ pub struct Parsed<'a, T> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Failed<E = ()> {
+pub struct Failed<E> {
     pub error: Error<E>,
     pub location: Location,
     pub state: State,
 }
 
-pub type Result<'a, T, E = ()> = std::result::Result<Parsed<'a, T>, Failed<E>>;
+pub type Result<'a, T, E> = std::result::Result<Parsed<'a, T>, Failed<E>>;
 
-// TODO test
 pub fn document<'a, E, V, F>(input: &'a str, parser: F)
 -> std::result::Result<V, (Error<E>, Location)>
 where F: Fn(Input<'a>) -> Result<V, E> {

@@ -1,6 +1,6 @@
 
-extern crate parsoid;
-use parsoid as par;
+extern crate absorb;
+use absorb as par;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 enum TestError {
@@ -17,9 +17,9 @@ macro_rules! test {
     ($name:ident($($arg:tt)*) -> $ret:ty: $( $input:expr => ($($check:tt)*) ),* $(,)*) => {
         {
             let parser = {
-                use parsoid::*;
+                use absorb::*;
                 |input| {
-                    let result: parsoid::Result<$ret, TestError> = $name($($arg)*)(input);
+                    let result: absorb::Result<$ret, TestError> = $name($($arg)*)(input);
                     result
                 }
             };
@@ -34,7 +34,7 @@ macro_rules! test {
 macro_rules! test_case {
     ($parser:expr, $parser_desc:expr, $input:expr, ($($check:tt)*)) => {
         {
-            let result = parsoid::parse::<_, TestError, _>($input, $parser);
+            let result = absorb::parse::<_, TestError, _>($input, $parser);
             test_case_check!($parser_desc, $input, result, $($check)*);
         }
     }
@@ -43,22 +43,22 @@ macro_rules! test_case {
 macro_rules! test_case_check {
     ($parser_desc:expr, $input:expr, $result:expr, ok: $value:expr, $loc:expr) => {
         test_case_ok!(
-            $parser_desc, $input, $result, $value, parsoid::State::Complete, $loc
+            $parser_desc, $input, $result, $value, absorb::State::Complete, $loc
         );
     };
     ($parser_desc:expr, $input:expr, $result:expr, ok?: $value:expr, $loc:expr) => {
         test_case_ok!(
-            $parser_desc, $input, $result, $value, parsoid::State::Incomplete, $loc
+            $parser_desc, $input, $result, $value, absorb::State::Incomplete, $loc
         );
     };
     ($parser_desc:expr, $input:expr, $result:expr, err: $error:expr, $loc:expr) => {
         test_case_err!(
-            $parser_desc, $input, $result, $error, parsoid::State::Complete, $loc
+            $parser_desc, $input, $result, $error, absorb::State::Complete, $loc
         );
     };
     ($parser_desc:expr, $input:expr, $result:expr, err?: $error:expr, $loc:expr) => {
         test_case_err!(
-            $parser_desc, $input, $result, $error, parsoid::State::Incomplete, $loc
+            $parser_desc, $input, $result, $error, absorb::State::Incomplete, $loc
         );
     }
 }
@@ -76,7 +76,7 @@ macro_rules! test_case_err {
                     format!("Ok value {:?} (state {:?}) with rest {:?}", v, s, r)
                 ),
             };
-            let expected = { #[allow(unused_imports)] use parsoid::*; $error };
+            let expected = { #[allow(unused_imports)] use absorb::*; $error };
             assert!(&error == &expected,
                 "{} -> {:?}:\n\t! Error is not as expected.\n\t\
                     Expected: {:?}\n\tReceived: {:?}\n",
@@ -137,11 +137,6 @@ macro_rules! test_case_ok {
 }
 
 #[test]
-fn test_infer() {
-    let _ = str_identifier();
-}
-
-#[test]
 fn document() {
     let loc = |p, l, c| par::Location { position: p, line: l, column: c };
     let doc = |input| par::document::<(), _, _>(input, par::many0(par::char_exact('x')));
@@ -150,7 +145,7 @@ fn document() {
 }
 
 #[test]
-fn complete() {
+fn parser_complete() {
     test!(complete(str_identifier()):
         "" => (err: Error::StrIdentifier, (0, 1, 1)),
         " " => (err: Error::StrIdentifier, (0, 1, 1)),
@@ -160,7 +155,7 @@ fn complete() {
 }
 
 #[test]
-fn location() {
+fn parser_location() {
     let loc = |p, l, c| par::Location { position: p, line: l, column: c };
     test!(take_right(optional(str_whitespace()), take_right(str_identifier(), location())):
         "foo." => (ok: loc(3, 1, 4), "."),
@@ -170,7 +165,7 @@ fn location() {
 }
 
 #[test]
-fn str_until() {
+fn parser_str_until() {
     test!(str_until(char_newline()):
         "foo\nbar\nbaz" => (ok: "foo", "bar\nbaz"),
         "foo\n " => (ok: "foo", " "),
@@ -187,7 +182,7 @@ fn str_until() {
 }
 
 #[test]
-fn char_any() {
+fn parser_char_any() {
     test!(char_any():
         "foo" => (ok: 'f', "oo"),
         "f" => (ok: 'f', ""),
@@ -197,7 +192,7 @@ fn char_any() {
 }
 
 #[test]
-fn value_from() {
+fn parser_value_from() {
     test!(value_from(|| 23):
         "" => (ok: 23, ""),
         " " => (ok: 23, " "),
@@ -211,7 +206,7 @@ fn value_from() {
 }
 
 #[test]
-fn value() {
+fn parser_value() {
     test!(value(23):
         "" => (ok: 23, ""),
         " " => (ok: 23, " "),
@@ -225,7 +220,7 @@ fn value() {
 }
 
 #[test]
-fn take_left() {
+fn parser_take_left() {
     test!(take_left(str_exact("foo"), str_exact("bar")):
         "foobar" => (ok: "foo", ""),
         "foobarbaz" => (ok: "foo", "baz"),
@@ -239,7 +234,7 @@ fn take_left() {
 }
 
 #[test]
-fn error_fmap() {
+fn parser_error_fmap() {
     test!(
         error_fmap(str_identifier::<()>(), |e| {
             assert_eq!(e, Error::StrIdentifier);
@@ -263,7 +258,7 @@ fn error_fmap() {
 }
 
 #[test]
-fn error_map() {
+fn parser_error_map() {
     test!(
         error_map(str_identifier::<()>(), |e| {
             assert_eq!(e, Error::StrIdentifier);
@@ -277,7 +272,7 @@ fn error_map() {
 }
 
 #[test]
-fn value_fmap() {
+fn parser_value_fmap() {
     test!(value_fmap(str_identifier(), |v| Ok(Wrap(v))):
         "foo" => (ok?: Wrap("foo"), ""),
         "foo " => (ok: Wrap("foo"), " "),
@@ -293,7 +288,7 @@ fn value_fmap() {
 }
 
 #[test]
-fn end_of_line() {
+fn parser_end_of_line() {
     test!(end_of_line():
         "" => (ok?: None, ""),
         "\n" => (ok: Some('\n'), ""),
@@ -306,7 +301,7 @@ fn end_of_line() {
 }
 
 #[test]
-fn value_map() {
+fn parser_value_map() {
     test!(value_map(str_identifier(), |v| Wrap(v)):
         "foo" => (ok?: Wrap("foo"), ""),
         "foo " => (ok: Wrap("foo"), " "),
@@ -316,7 +311,7 @@ fn value_map() {
 }
 
 #[test]
-fn char_newline() {
+fn parser_char_newline() {
     test!(char_newline():
         "\n\n " => (ok: '\n', "\n "),
         "\n" => (ok: '\n', ""),
@@ -326,7 +321,7 @@ fn char_newline() {
 }
 
 #[test]
-fn end_of_input() {
+fn parser_end_of_input() {
     test!(end_of_input():
         "" => (ok?: (), ""),
         " " => (err: Error::EndOfInput, (0, 1, 1)),
@@ -335,7 +330,7 @@ fn end_of_input() {
 }
 
 #[test]
-fn error_from() {
+fn parser_error_from() {
     test!(error_from(State::Complete, || TestError::Test) -> ():
         "" => (err: Error::Custom(TestError::Test), (0, 1, 1)),
         "23" => (err: Error::Custom(TestError::Test), (0, 1, 1)),
@@ -359,7 +354,7 @@ fn error_from() {
 }
 
 #[test]
-fn error() {
+fn parser_error() {
     test!(error(State::Complete, TestError::Test) -> ():
         "" => (err: Error::Custom(TestError::Test), (0, 1, 1)),
         "23" => (err: Error::Custom(TestError::Test), (0, 1, 1)),
@@ -383,7 +378,7 @@ fn error() {
 }
 
 #[test]
-fn any() {
+fn parser_any() {
     test!(any(any(str_exact("foo"), str_exact("bar")), error(State::Complete, TestError::Test)):
         "foo" => (ok: "foo", ""),
         "bar" => (ok: "bar", ""),
@@ -395,7 +390,7 @@ fn any() {
 }
 
 #[test]
-fn many0() {
+fn parser_many0() {
     test!(many0(str_exact("foo")):
         "foo" => (ok?: vec!["foo"], ""),
         "foo23" => (ok: vec!["foo"], "23"),
@@ -408,7 +403,7 @@ fn many0() {
 }
 
 #[test]
-fn many1() {
+fn parser_many1() {
     test!(many1(str_exact("foo")):
         "foo" => (ok?: vec!["foo"], ""),
         "foo23" => (ok: vec!["foo"], "23"),
@@ -421,7 +416,7 @@ fn many1() {
 }
 
 #[test]
-fn either() {
+fn parser_either() {
     let make_error = || par::Error::Either(Box::new((
         par::Error::StrExact("foo"),
         par::Error::StrExact("bar"),
@@ -444,7 +439,7 @@ fn either() {
 }
 
 #[test]
-fn separated0() {
+fn parser_separated0() {
     test!(separated0(char_exact(','), str_identifier()):
         "a" => (ok?: vec!["a"], ""),
         "a,b,c" => (ok?: vec!["a", "b", "c"], ""),
@@ -456,7 +451,7 @@ fn separated0() {
 }
 
 #[test]
-fn separated1() {
+fn parser_separated1() {
     test!(separated1(char_exact(','), str_identifier()):
         "a" => (ok?: vec!["a"], ""),
         "a,b,c" => (ok?: vec!["a", "b", "c"], ""),
@@ -468,7 +463,7 @@ fn separated1() {
 }
 
 #[test]
-fn test_joined0() {
+fn parser_test_joined0() {
     test!(joined0(char_exact(','), str_identifier()):
         "a" => (ok?: vec!["a"], ""),
         "a,b,c" => (ok?: vec!["a", "b", "c"], ""),
@@ -480,7 +475,7 @@ fn test_joined0() {
 }
 
 #[test]
-fn test_joined1() {
+fn parser_test_joined1() {
     test!(joined1(char_exact(','), str_identifier()):
         "a" => (ok?: vec!["a"], ""),
         "a,b,c" => (ok?: vec!["a", "b", "c"], ""),
@@ -492,7 +487,7 @@ fn test_joined1() {
 }
 
 #[test]
-fn nothing() {
+fn parser_nothing() {
     test!(nothing():
         "" => (ok: (), ""),
         " " => (ok: (), " "),
@@ -501,7 +496,7 @@ fn nothing() {
 }
 
 #[test]
-fn list() {
+fn parser_list() {
     let comma = par::char_exact::<TestError>(',');
     test!(list(0, &comma, str_identifier(), optional(&comma)):
         "" => (ok?: Vec::<&str>::new(), ""),
@@ -535,7 +530,7 @@ fn list() {
 }
 
 #[test]
-fn char_exact() {
+fn parser_char_exact() {
     test!(char_exact('x'):
         "x" => (ok: 'x', ""),
         "xy" => (ok: 'x', "y"),
@@ -546,7 +541,7 @@ fn char_exact() {
 }
 
 #[test]
-fn take_right() {
+fn parser_take_right() {
     test!(take_right(str_exact("foo"), str_exact("bar")):
         "foobar" => (ok: "bar", ""),
         "foobarbaz" => (ok: "bar", "baz"),
@@ -560,7 +555,7 @@ fn take_right() {
 }
 
 #[test]
-fn optional() {
+fn parser_optional() {
     test!(optional(str_identifier()):
         "foo" => (ok?: Some("foo"), ""),
         "foo " => (ok: Some("foo"), " "),
@@ -571,7 +566,7 @@ fn optional() {
 }
 
 #[test]
-fn delimited() {
+fn parser_delimited() {
     test!(delimited(str_identifier(), str_whitespace(), str_keyword("b")):
         "a b" => (ok?: " ", ""),
         "a b " => (ok: " ", " "),
@@ -591,7 +586,7 @@ fn delimited() {
 }
 
 #[test]
-fn combine() {
+fn parser_combine() {
     test!(combine(str_exact("foo"), str_exact("bar"), |a, b| (a, b)):
         "foobar" => (ok: ("foo", "bar"), ""),
         "foobarbaz" => (ok: ("foo", "bar"), "baz"),
@@ -605,7 +600,7 @@ fn combine() {
 }
 
 #[test]
-fn str_exact() {
+fn parser_str_exact() {
     test!(str_exact("foo"):
         "foo" => (ok: "foo", ""),
         "foobar" => (ok: "foo", "bar"),
@@ -618,7 +613,7 @@ fn str_exact() {
 }
 
 #[test]
-fn str_keyword() {
+fn parser_str_keyword() {
     test!(str_keyword("foo_bar"):
         "foo_bar" => (ok?: "foo_bar", ""),
         "foo_bar " => (ok: "foo_bar", " "),
@@ -630,7 +625,7 @@ fn str_keyword() {
 }
 
 #[test]
-fn str_identifier() {
+fn parser_str_identifier() {
     test!(str_identifier():
         "f" => (ok?: "f", ""),
         "foo" => (ok?: "foo", ""),
@@ -646,7 +641,7 @@ fn str_identifier() {
 }
 
 #[test]
-fn str_whitespace() {
+fn parser_str_whitespace() {
     test!(str_whitespace():
         " " => (ok?: " ", ""),
         "\t" => (ok?: "\t", ""),
