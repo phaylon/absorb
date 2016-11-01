@@ -1,20 +1,43 @@
-#![feature(conservative_impl_trait)]
+#![feature( conservative_impl_trait, never_type )]
+#![warn( missing_docs )]
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Error<E> {
-    Custom(E),
-    StrWhitespace,
-    StrIdentifier,
-    StrExact(&'static str),
-    StrKeyword(&'static str),
-    CharExact(char),
-    CharAny,
-    ListEnd,
-    Either(Box<(Error<E>, Error<E>)>),
-    AtLeast(usize, usize),
-    EndOfInput,
-}
+//! An experimental parser combinator library based on `impl Fn(..) -> ..` types.
+//!
+//! # Description
+//!
+//! In the context of this library, a parser is anything implementing
+//! `Fn(Input<'a>) -> PResult<'a, _, _, _>`.
+//!
+//! # Parsing Functions
+//!
+//! The `get`, `parse` and `document` functions can be used to apply parsers to input
+//! `&str` values:
+//!
+//! * The `parse` function is the raw parser application function.
+//! * The `get` function is a convenience function to parse from the beginning of a
+//!   `&str`.
+//! * The `document` function is a convenience function to parse a full document contained
+//!   in a `&str`.
 
+use std::fmt;
+
+#[macro_use]
+mod test_util;
+
+#[macro_use]
+mod macros;
+
+mod result;
+pub use result::*;
+
+mod parser;
+pub use parser::*;
+
+/// Input consumption interface.
+///
+/// You cannot directly generate a value of this type. The main parsing functions take
+/// a `&str` value and a parser, and will wrap the input in this interface before passing
+/// it to the parser for consumption.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct Input<'a> {
     slice: &'a str,
@@ -23,18 +46,35 @@ pub struct Input<'a> {
 
 impl<'a> Input<'a> {
 
+    /// Access the leftover input as slice.
+    #[inline]
     pub fn slice(&self) -> &'a str { self.slice }
 
+    /// The length of the leftover input slice.
+    #[inline]
     pub fn len(&self) -> usize { self.slice.len() }
 
+    /// A predicate checking if the leftover input slice is empty.
+    ///
+    /// This indicates the end of input has been reached.
+    #[inline]
     pub fn is_empty(&self) -> bool { self.slice.len() == 0 }
 
+    /// Construct a `Location` for the current input position.
+    #[inline]
     pub fn location(&self) -> Location { self.location }
 
+    /// Consume all leftover input.
+    #[inline]
     pub fn consume_all(&self) -> (&'a str, Input<'a>) {
         self.consume(self.len())
     }
 
+    /// Returns a `State::Complete` if there is more input to parse.
+    #[inline]
+    pub fn rest_state(&self) -> State { State::from_rest(*self) }
+
+    /// Consume a specific input length.
     pub fn consume(&self, len: usize) -> (&'a str, Input<'a>) {
         assert!(
             self.slice.len() >= len,
@@ -61,38 +101,75 @@ impl<'a> Input<'a> {
     }
 }
 
-pub fn parse<'a, V, E, P>(input_str: &'a str, parser: P)
--> std::result::Result<(V, State, &'a str), (Error<E>, State, Location)>
-where P: Fn(Input<'a>) -> Result<V, E> {
-    let input = Input {
-        slice: input_str,
-        location: Location {
-            position: 0,
-            line: 1,
-            column: 1,
-        }
-    };
-    match parser(input) {
-        Ok(Parsed { value, rest, state }) => Ok((value, state, rest.slice())),
-        Err(Failed { error, location, state }) => Err((error, state, location)),
-    }
-}
-
+/// A location during input consumption.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct Location {
+    /// The line number of this location in the input slice.
+    ///
+    /// Begins at 1.
     pub line: usize,
+    /// The column number of this location in the input slice.
+    ///
+    /// Begins at 1 and counts from the beginning of the line.
     pub column: usize,
+    /// The position of this location in the input slice.
+    ///
+    /// Begins at 0 and is suitable for further slicing of the input.
     pub position: usize,
 }
 
+impl<'a> From<Input<'a>> for Location {
+
+    fn from(input: Input<'a>) -> Location { input.location() }
+}
+
+impl Default for Location {
+
+    fn default() -> Location {
+        Location {
+            line: 1,
+            column: 1,
+            position: 0,
+        }
+    }
+}
+
+impl fmt::Display for Location {
+
+    fn fmt(&self, out: &mut fmt::Formatter) -> fmt::Result {
+        write!(out, "line {}, column {}", self.line, self.column)
+    }
+}
+
+/// Completion state indicator.
+///
+/// A complete value indicates that the parsed value will not change with additional
+/// input.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum State {
+    /// No further input required.
     Complete,
+    /// Further input required.
     Incomplete,
+}
+
+impl fmt::Display for State {
+
+    fn fmt(&self, out: &mut fmt::Formatter) -> fmt::Result {
+        write!(out, "{}", match *self {
+            State::Complete => "complete",
+            State::Incomplete => "incomplete",
+        })
+    }
 }
 
 impl State {
 
+    /// Merge this state with another.
+    ///
+    /// If one of the states is `Incomplete`, the resulting state will also be
+    /// `Incomplete`. Otherwise a `Complete` state is returned.
+    #[inline]
     pub fn merge(self, other: State) -> State {
         match (self, other) {
             (State::Complete, State::Complete) => State::Complete,
@@ -100,562 +177,173 @@ impl State {
         }
     }
 
-    pub fn merge_into<V, E>(self, result: Result<V, E>) -> Result<V, E> {
-        match result {
-            Ok(Parsed { value, rest, state })
-                => Ok(Parsed { value: value, rest: rest, state: self.merge(state) }),
-            Err(Failed { error, location, state })
-                => Err(Failed { error: error, location: location, state: self.merge(state) }),
-        }
-    }
-
+    #[inline]
     fn from_expected_input(input: Input, expected: &str) -> State {
         if input.len() >= expected.len() { State::Complete }
         else if expected.starts_with(input.slice()) { State::Incomplete }
         else { State::Complete }
     }
 
+    #[inline]
     fn from_rest(input: Input) -> State {
         if !input.is_empty() { State::Complete }
         else { State::Incomplete }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Parsed<'a, T> {
-    pub value: T,
-    pub rest: Input<'a>,
-    pub state: State,
+/// An error from the `get` parse function.
+#[derive( Debug, Copy, Clone, PartialEq, Eq )]
+pub enum GetError<F, E> {
+    /// Parsing has failed with the given result and state at the
+    /// provided location.
+    Failed(F, State, Location),
+    /// An error has occured.
+    Error(E),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Failed<E> {
-    pub error: Error<E>,
-    pub location: Location,
-    pub state: State,
-}
+impl<F, E> fmt::Display for GetError<F, E>
+where F: fmt::Display, E: fmt::Display {
 
-pub type Result<'a, T, E> = std::result::Result<Parsed<'a, T>, Failed<E>>;
-
-pub fn document<'a, E, V, F>(input: &'a str, parser: F)
--> std::result::Result<V, (Error<E>, Location)>
-where F: Fn(Input<'a>) -> Result<V, E> {
-    match parse(input, complete(take_left(parser, end_of_input()))) {
-        Ok((value, _, _)) => Ok(value),
-        Err((error, _, location)) => Err((error, location)),
-    }
-}
-
-pub fn complete<'a, E, V, F>(parser: F) -> impl Fn(Input<'a>) -> Result<V, E>
-where F: Fn(Input<'a>) -> Result<V, E> {
-    move |input| match parser(input) {
-        Ok(Parsed { value, rest, .. })
-            => Ok(Parsed { value: value, rest: rest, state: State::Complete }),
-        Err(Failed { error, location, .. })
-            => Err(Failed { error: error, location: location, state: State::Complete }),
-    }
-}
-
-pub fn location<E>() -> impl Fn(Input) -> Result<Location, E> {
-    |input| Ok(Parsed { value: input.location(), rest: input, state: State::Complete })
-}
-
-pub fn str_until<'a, E, V, F>(end: F) -> impl Fn(Input<'a>) -> Result<&'a str, E>
-where F: Fn(Input<'a>) -> Result<V, E> {
-    move |input| {
-        let mut current = input;
-        let mut consumed = 0;
-        loop {
-            match end(current) {
-                Ok(Parsed { rest, state, .. }) => {
-                    let (span, input_rest) = input.consume(consumed);
-                    return Ok(Parsed {
-                        value: span,
-                        rest: rest,
-                        state: State::from_rest(input_rest).merge(state),
-                    });
-                },
-                Err(failed) => match current.slice().chars().nth(0) {
-                    Some(c) => {
-                        let (_, new) = current.consume(c.len_utf8());
-                        current = new;
-                        consumed += c.len_utf8();
-                    },
-                    None => return Err(failed),
-                },
-            }
+    fn fmt(&self, out: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            GetError::Failed(ref error, _, location) =>
+                write!(out, "Parse Error at {}: {}", location, error),
+            GetError::Error(ref error) =>
+                error.fmt(out),
         }
     }
 }
 
-pub fn char_any<E>() -> impl Fn(Input) -> Result<char, E> {
-    |input| match input.slice().chars().nth(0) {
-        Some(c) => {
-            let (_, rest) = input.consume(c.len_utf8());
-            Ok(Parsed { value: c, rest: rest, state: State::Complete })
-        },
-        None => Err(Failed {
-            error: Error::CharAny,
-            location: input.location(),
-            state: State::Incomplete,
+/// A utility function for parsing from the beginning of a `&str`.
+pub fn get<'a, Y, N, E, P>(input_str: &'a str, parser: P)
+-> Result<(Y, State, &'a str), GetError<N, E>>
+where P: Fn(Input<'a>) -> PResult<'a, Y, N, E> {
+    match parse(input_str, parser, None) {
+        Ok(ParseResult::Parsed(Parsed { value, rest, state }))
+            => Ok((value, state, rest.slice())),
+        Ok(ParseResult::Failed(Failed { error, location, state }))
+            => Err(GetError::Failed(error, state, location)),
+        Err(error)
+            => Err(GetError::Error(error)),
+    }
+}
+
+/// The raw parsing function applying a parser to an input `&str`.
+pub fn parse<'a, Y, N, E, P>(input_str: &'a str, parser: P, last: Option<Location>)
+-> PResult<'a, Y, N, E>
+where P: Fn(Input<'a>) -> PResult<'a, Y, N, E> {
+    parser(Input {
+        slice: input_str,
+        location: last.unwrap_or(Location::default()),
+    })
+}
+
+/// An error from the `document` parse function.
+#[derive( Debug, Copy, Clone, PartialEq, Eq )]
+pub enum DocumentError<PE, E> {
+    /// Parsing has failed with the given error at the given location.
+    Parse {
+        /// The parse failure value.
+        error: PE,
+        /// The location at which the parse error occured.
+        location: Location,
+    },
+    /// There is leftover input that couldn't be parsed.
+    Unparsed {
+        /// The location where the unparsed input begins.
+        location: Location,
+    },
+    /// An error occured.
+    Fatal {
+        /// The fatal error returned from the parser.
+        error: E,
+    },
+}
+
+impl<F, E> fmt::Display for DocumentError<F, E>
+where F: fmt::Display, E: fmt::Display {
+
+    fn fmt(&self, out: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            DocumentError::Parse { ref error, location } =>
+                write!(out, "Parse Error at {}: {}", location, error),
+            DocumentError::Unparsed { location } =>
+                write!(out, "Unparsable input at {}", location),
+            DocumentError::Fatal { ref error } =>
+                error.fmt(out),
+        }
+    }
+}
+
+/// Utility function for parsing a whole document.
+///
+/// Ensures that the whole input `&str` has been parsed.
+pub fn document<'a, Y, N, E, F>(input: &'a str, parser: F)
+-> Result<Y, DocumentError<N, E>>
+where F: Fn(Input<'a>) -> PResult<Y, N, E> {
+    match parse(input, take_left(parser, infer_void_error(end_of_input())), None) {
+        Ok(ParseResult::Parsed(Parsed { value, .. })) => Ok(value),
+        Ok(ParseResult::Failed(Failed { error, location, .. })) => Err(match error {
+            PairError::Left(p_error)
+                => DocumentError::Parse { error: p_error, location: location },
+            PairError::Right(_)
+                => DocumentError::Unparsed { location: location },
         }),
+        Err(error) => Err(DocumentError::Fatal { error: error }),
     }
 }
 
-pub fn value_from<E, V, F>(from: F) -> impl Fn(Input) -> Result<V, E>
-where F: Fn() -> V {
-    move |input| Ok(Parsed { value: from(), rest: input, state: State::Complete })
-}
+#[cfg(test)]
+mod tests {
 
-pub fn value<E, V>(value: V) -> impl Fn(Input) -> Result<V, E>
-where V: Clone {
-    move |input| Ok(Parsed { value: value.clone(), rest: input, state: State::Complete })
-}
+    #[test]
+    fn get() {
+        assert_eq!(
+            super::get("foo", super::str_identifier()),
+            Ok((
+                "foo",
+                super::State::Incomplete,
+                "",
+            ))
+        );
+        assert_eq!(
+            super::get("23", super::str_identifier()),
+            Err(super::GetError::Failed(
+                super::NoIdentifier,
+                super::State::Complete,
+                super::Location {
+                    line: 1,
+                    column: 1,
+                    position: 0,
+                },
+            ))
+        );
+        assert_eq!(
+            super::get("", super::error(23)),
+            Err(super::GetError::Error(23))
+        );
+    }
 
-pub fn take_left<'a, E, F1, R1, F2, R2>(left: F1, right: F2)
--> impl Fn(Input<'a>)
--> Result<R1, E>
-    where
-        F1: Fn(Input<'a>) -> Result<R1, E>,
-        F2: Fn(Input<'a>) -> Result<R2, E> {
-    move |input| {
-        let l_res = left(input)?;
-        let r_res = right(l_res.rest)?;
-        Ok(Parsed {
-            value: l_res.value,
-            rest: r_res.rest,
-            state: l_res.state.merge(r_res.state),
-        })
+    #[test]
+    fn document_item() {
+        let loc = |p, l, c| ::Location { position: p, line: l, column: c };
+        let doc = |input| ::document(input, ::str_identifier());
+        assert_eq!(doc("xxx"), Ok("xxx"));
+        assert_eq!(doc("23"), Err(::DocumentError::Parse {
+            error: ::NoIdentifier,
+            location: loc(0, 1, 1),
+        }));
+    }
+
+    #[test]
+    fn document_list() {
+        let loc = |p, l, c| ::Location { position: p, line: l, column: c };
+        let limit = ::ListLimit::Limited(3);
+        let doc = |input| ::document(input, ::list(::nothing(), ::char_exact('x'), limit));
+        assert_eq!(doc("xxx"), Ok(vec!['x', 'x', 'x']));
+        assert_eq!(doc("xxy"), Err(::DocumentError::Unparsed { location: loc(2, 1, 3) }));
+        assert_eq!(doc("xxxx"), Err(::DocumentError::Fatal {
+            error: ::ListError::LimitExceeded { limit: 3 },
+        }));
     }
 }
-
-pub fn error_fmap<'a, E, F, FR, M, ME>(parser: F, mapper: M)
--> impl Fn(Input<'a>)
--> Result<FR, ME>
-    where
-        F: Fn(Input<'a>) -> Result<FR, E>,
-        M: Fn(Error<E>) -> std::result::Result<FR, ME> {
-    move |input| {
-        match parser(input) {
-            Ok(v) => Ok(v),
-            Err(Failed { error, state, location }) => match mapper(error) {
-                Ok(value) => Ok(Parsed { value: value, rest: input, state: state }),
-                Err(error) => Err(Failed {
-                    error: Error::Custom(error),
-                    location: location,
-                    state: state,
-                }),
-            },
-        }
-    }
-}
-
-pub fn error_map<'a, E, F, FR, M, ME>(parser: F, mapper: M)
--> impl Fn(Input<'a>)
--> Result<FR, ME>
-where F: Fn(Input<'a>) -> Result<FR, E>, M: Fn(Error<E>) -> ME {
-    move |input| {
-        match parser(input) {
-            Ok(v) => Ok(v),
-            Err(Failed { error, location, state }) => Err(Failed {
-                error: Error::Custom(mapper(error)),
-                location: location,
-                state: state,
-            }),
-        }
-    }
-}
-
-pub fn value_fmap<'a, E, F, FR, M, MR>(parser: F, mapper: M)
--> impl Fn(Input<'a>)
--> Result<MR, E>
-    where
-        F: Fn(Input<'a>) -> Result<FR, E>,
-        M: Fn(FR) -> std::result::Result<MR, E> {
-    move |input| {
-        match parser(input) {
-            Ok(Parsed { value, rest, state }) => match mapper(value) {
-                Ok(value) => Ok(Parsed { value: value, rest: rest, state: state }),
-                Err(error) => Err(Failed {
-                    error: Error::Custom(error),
-                    location: input.location(),
-                    state: state,
-                }),
-            },
-            Err(e) => Err(e),
-        }
-    }
-}
-
-pub fn end_of_line<'a, E>() -> impl Fn(Input<'a>) -> Result<Option<char>, E> {
-    either(
-        value_map(end_of_input(), |_| None),
-        value_map(char_newline(), |s| Some(s)),
-    )
-}
-
-pub fn value_map<'a, E, F, FR, M, MR>(parser: F, mapper: M)
--> impl Fn(Input<'a>)
--> Result<MR, E>
-where F: Fn(Input<'a>) -> Result<FR, E>, M: Fn(FR) -> MR {
-    move |input| {
-        match parser(input) {
-            Ok(Parsed { value, rest, state }) => Ok(Parsed {
-                value: mapper(value),
-                rest: rest,
-                state: state,
-            }),
-            Err(e) => Err(e),
-        }
-    }
-}
-
-pub fn char_newline<E>() -> impl Fn(Input) -> Result<char, E> {
-    char_exact('\n')
-}
-
-pub fn end_of_input<E>() -> impl Fn(Input) -> Result<(), E> {
-    |input| {
-        if !input.is_empty() {
-            Err(Failed {
-                error: Error::EndOfInput,
-                location: input.location(),
-                state: State::Complete,
-            })
-        }
-        else {
-            Ok(Parsed { value: (), rest: input, state: State::Incomplete })
-        }
-    }
-}
-
-pub fn error_from<E, V, F>(state: State, from: F) -> impl Fn(Input) -> Result<V, E>
-where F: Fn() -> E {
-    move |input| Err(Failed {
-        error: Error::Custom(from()),
-        location: input.location(),
-        state: state,
-    })
-}
-
-pub fn error<E, V>(state: State, error: E) -> impl Fn(Input) -> Result<V, E>
-where E: Clone {
-    move |input| Err(Failed {
-        error: Error::Custom(error.clone()),
-        location: input.location(),
-        state: state,
-    })
-}
-
-pub fn any<'a, E, F1, F2, R>(f1: F1, f2: F2) -> impl Fn(Input<'a>) -> Result<R, E>
-where F1: Fn(Input<'a>) -> Result<R, E>, F2: Fn(Input<'a>) -> Result<R, E> {
-    move |input| {
-        match f1(input) {
-            Ok(v) => Ok(v),
-            Err(Failed { state, .. }) => state.merge_into(f2(input)),
-        }
-    }
-}
-
-pub fn many0<'a, E, F, R>(item: F) -> impl Fn(Input<'a>) -> Result<Vec<R>, E>
-where F: Fn(Input<'a>) -> Result<R, E> {
-    list(0, nothing(), item, nothing())
-}
-
-pub fn many1<'a, E, F, R>(item: F) -> impl Fn(Input<'a>) -> Result<Vec<R>, E>
-where F: Fn(Input<'a>) -> Result<R, E> {
-    list(1, nothing(), item, nothing())
-}
-
-pub fn either<'a, E, F1, F2, R>(f1: F1, f2: F2)
--> impl Fn(Input<'a>)
--> Result<R, E>
-where F1: Fn(Input<'a>) -> Result<R, E>, F2: Fn(Input<'a>) -> Result<R, E> {
-    move |input| {
-        let (err1, state1) = match f1(input) {
-            Err(Failed { error, state, .. }) => (error, state),
-            Ok(v) => return Ok(v),
-        };
-        let (err2, state2) = match f2(input) {
-            Err(Failed { error, state, .. }) => (error, state),
-            Ok(v) => return state1.merge_into(Ok(v)),
-        };
-        Err(Failed {
-            error: Error::Either(Box::new((err1, err2))),
-            location: input.location(),
-            state: state1.merge(state2),
-        })
-    }
-}
-
-pub fn separated0<'a, E, S, SR, I, IR>(sep: S, item: I)
--> impl Fn(Input<'a>)
--> Result<Vec<IR>, E>
-where S: Fn(Input<'a>) -> Result<SR, E>, I: Fn(Input<'a>) -> Result<IR, E> {
-    move |input| list(0, &sep, &item, optional(&sep))(input)
-}
-
-pub fn separated1<'a, E, S, SR, I, IR>(sep: S, item: I)
--> impl Fn(Input<'a>)
--> Result<Vec<IR>, E>
-where S: Fn(Input<'a>) -> Result<SR, E>, I: Fn(Input<'a>) -> Result<IR, E> {
-    move |input| list(1, &sep, &item, optional(&sep))(input)
-}
-
-pub fn joined0<'a, E, S, SR, I, IR>(sep: S, item: I)
--> impl Fn(Input<'a>)
--> Result<Vec<IR>, E>
-where S: Fn(Input<'a>) -> Result<SR, E>, I: Fn(Input<'a>) -> Result<IR, E> {
-    list(0, sep, item, nothing())
-}
-
-pub fn joined1<'a, E, S, SR, I, IR>(sep: S, item: I)
--> impl Fn(Input<'a>)
--> Result<Vec<IR>, E>
-where S: Fn(Input<'a>) -> Result<SR, E>, I: Fn(Input<'a>) -> Result<IR, E> {
-    list(1, sep, item, nothing())
-}
-
-pub fn nothing<E>() -> impl Fn(Input) -> Result<(), E> {
-    |input| Ok(Parsed { value: (), rest: input, state: State::Complete })
-}
-
-pub fn char_exact<E>(expected: char) -> impl Fn(Input) -> Result<char, E> {
-    move |input| {
-        match input.slice().chars().nth(0) {
-            Some(c) if c == expected => {
-                let (_, rest) = input.consume(c.len_utf8());
-                Ok(Parsed { value: c, rest: rest, state: State::Complete })
-            },
-            _ => Err(Failed {
-                error: Error::CharExact(expected),
-                location: input.location(),
-                state: State::from_rest(input),
-            }),
-        }
-    }
-}
-
-pub fn take_right<'a, E, F1, R1, F2, R2>(left: F1, right: F2)
--> impl Fn(Input<'a>)
--> Result<R2, E>
-    where
-        F1: Fn(Input<'a>) -> Result<R1, E>,
-        F2: Fn(Input<'a>) -> Result<R2, E> {
-    move |input| {
-        let l_res = left(input)?;
-        l_res.state.merge_into(right(l_res.rest))
-    }
-}
-
-pub fn list<'a, E, SF, SR, IF, IR, EF, ER>(min: usize, sep: SF, item: IF, end: EF)
--> impl Fn(Input<'a>)
--> Result<Vec<IR>, E>
-    where
-        SF: Fn(Input<'a>) -> Result<SR, E>,
-        IF: Fn(Input<'a>) -> Result<IR, E>,
-        EF: Fn(Input<'a>) -> Result<ER, E> {
-    move |input| {
-        let mut items = Vec::new();
-        let mut all_state = State::Complete;
-        let rest = match item(input) {
-            Ok(Parsed { value, rest, state }) => {
-                items.push(value);
-                all_state = all_state.merge(state);
-                let mut current = rest;
-                loop {
-                    match take_right(&sep, &item)(current) {
-                        Ok(Parsed { value, rest, state }) => {
-                            items.push(value);
-                            current = rest;
-                            all_state = all_state.merge(state);
-                        },
-                        Err(Failed { state, .. }) => {
-                            all_state = all_state.merge(state);
-                            let Parsed { rest, state: end_state, .. } = match end(current) {
-                                Ok(parsed) => parsed,
-                                Err(failed) => {
-                                    all_state = all_state.merge(failed.state);
-                                    return Err(Failed {
-                                        error: Error::ListEnd,
-                                        location: current.location(),
-                                        state: all_state,
-                                    });
-                                },
-                            };
-                            current = rest;
-                            all_state = all_state.merge(end_state);
-                            break;
-                        },
-                    }
-                }
-                current
-            },
-            Err(Failed { state, .. }) => {
-                all_state = all_state.merge(state);
-                input
-            },
-        };
-        if items.len() >= min {
-            Ok(Parsed {
-                value: items,
-                rest: rest,
-                state: all_state.merge(State::from_rest(rest)),
-            })
-        }
-        else {
-            Err(Failed {
-                error: Error::AtLeast(min, items.len()),
-                location: input.location(),
-                state: all_state.merge(State::from_rest(rest)),
-            })
-        }
-    }
-}
-
-pub fn optional<'a, E, F, R>(parser: F)
--> impl Fn(Input<'a>)
--> Result<Option<R>, E>
-where F: Fn(Input<'a>) -> Result<R, E> {
-    move |input| {
-        match parser(input) {
-            Ok(Parsed { value, rest, state }) => Ok(Parsed {
-                value: Some(value),
-                rest: rest,
-                state: state,
-            }),
-            Err(Failed { state, .. }) => Ok(Parsed { value: None, rest: input, state: state }),
-        }
-    }
-}
-
-pub fn delimited<'a, E, L, LR, R, RR, I, IR>(left: L, center: I, right: R)
--> impl Fn(Input<'a>)
--> Result<IR, E>
-    where
-        L: Fn(Input<'a>) -> Result<LR, E>,
-        R: Fn(Input<'a>) -> Result<RR, E>,
-        I: Fn(Input<'a>) -> Result<IR, E> {
-    move |input| {
-        let Parsed { state: state_l, rest, .. } = left(input)?;
-        let Parsed { state: state_c, value, rest } = center(rest)?;
-        let Parsed { state: state_r, rest, .. } = right(rest)?;
-        Ok(Parsed {
-            value: value,
-            rest: rest,
-            state: state_l.merge(state_c).merge(state_r),
-        })
-    }
-}
-
-pub fn combine<'a, E, F1, R1, F2, R2, FR, R>(f1: F1, f2: F2, comb: FR)
--> impl Fn(Input<'a>)
--> Result<R, E>
-    where
-        F1: Fn(Input<'a>) -> Result<R1, E>,
-        F2: Fn(Input<'a>) -> Result<R2, E>,
-        FR: Fn(R1, R2) -> R {
-    move |input| {
-        let Parsed { state: state1, value: r1, rest } = f1(input)?;
-        let Parsed { state: state2, value: r2, rest } = f2(rest)?;
-        Ok(Parsed { value: comb(r1, r2), rest: rest, state: state1.merge(state2) })
-    }
-}
-
-pub fn str_exact<E>(expected: &'static str) -> impl Fn(Input) -> Result<&str, E> {
-    move |input| {
-        if input.slice().starts_with(expected) {
-            let (value, rest) = input.consume(expected.len());
-            Ok(Parsed {
-                value: value,
-                rest: rest,
-                state: State::Complete,
-            })
-        }
-        else {
-            Err(Failed {
-                error: Error::StrExact(expected),
-                location: input.location(),
-                state: State::from_expected_input(input, expected),
-            })
-        }
-    }
-}
-
-pub fn str_keyword<E>(expected: &'static str) -> impl Fn(Input) -> Result<&str, E> {
-    move |input| {
-        match str_identifier::<E>()(input) {
-            Ok(Parsed { value, rest, state }) if value == expected
-                 => Ok(Parsed { value: value, rest: rest, state: state }),
-            Ok(_) => Err(Failed {
-                error: Error::StrKeyword(expected),
-                location: input.location(),
-                state: State::from_expected_input(input, expected),
-            }),
-            Err(Failed { state, .. }) => Err(Failed {
-                error: Error::StrKeyword(expected),
-                location: input.location(),
-                state: State::from_expected_input(input, expected).merge(state),
-            }),
-        }
-    }
-}
-
-pub fn str_identifier<E>() -> impl Fn(Input) -> Result<&str, E> {
-    fn is_identifier_start(c: char) -> bool {
-        match c { 'a'...'z' | 'A'...'Z' | '_' => true, _ => false }
-    }
-    fn is_identifier_tail(c: char) -> bool {
-        match c { 'a'...'z' | 'A'...'Z' | '0'...'9' | '_' => true, _ => false }
-    }
-    |input| {
-        let (value, rest) = match input.slice().chars().nth(0) {
-            Some(c) if is_identifier_start(c) => input
-                .slice()
-                .char_indices()
-                .find(|&(_, c)| !is_identifier_tail(c))
-                .map_or_else(
-                    || input.consume_all(),
-                    |(p, _)| input.consume(p),
-                ),
-            _ => return Err(Failed {
-                error: Error::StrIdentifier,
-                location: input.location(),
-                state: State::from_rest(input),
-            }),
-        };
-        Ok(Parsed {
-            value: value,
-            rest: rest,
-            state: State::from_rest(rest),
-        })
-    }
-}
-
-pub fn str_whitespace<E>() -> impl Fn(Input) -> Result<&str, E> {
-    fn is_whitespace(c: char) -> bool {
-        match c { ' ' | '\t' | '\n' => true, _ => false }
-    }
-    |input| {
-        let pos = input.slice().char_indices()
-            .find(|&(_, c)| !is_whitespace(c))
-            .map_or_else(|| input.len(), |(p, _)| p);
-        match pos {
-            0 => Err(Failed {
-                error: Error::StrWhitespace,
-                location: input.location(),
-                state: State::from_rest(input),
-            }),
-            p => {
-                let (slice, rest) = input.consume(p);
-                Ok(Parsed {
-                    value: slice,
-                    rest: rest,
-                    state: State::from_rest(rest),
-                })
-            },
-        }
-    }
-}
-
-
