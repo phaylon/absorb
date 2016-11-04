@@ -18,6 +18,11 @@
 //!   `&str`.
 //! * The `document` function is a convenience function to parse a full document contained
 //!   in a `&str`.
+//!
+//! # Error Handling
+//!
+//! This library doesn't have a single error type. Instead, specific error types are used
+//! depending on the situation.
 
 use std::fmt;
 
